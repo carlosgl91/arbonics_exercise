@@ -1,0 +1,816 @@
+---
+title: "Arbonics Home Assignment - Carbon Analyst"
+author: "Carlos Gimenez"
+date: "2025-10-06"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 4
+    toc_collapsed: true
+    number_sections: true
+    theme: simplex
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r, echo=FALSE,results='hide',message=FALSE,warning=FALSE}
+library(tidyverse)
+library(openxlsx)
+library(janitor)
+library(ggplot2)
+library(DT)
+library(purrr)
+```
+
+```{r, echo=FALSE}
+
+create_dt <- function(datos, titulo_tabla, boton, archivo) {
+  boton1 <- paste("Download ", boton)
+  DT::datatable(
+    datos,
+    rownames = FALSE,
+    caption = titulo_tabla,
+    extensions = 'Buttons',
+    options = list(dom = 'tpB',
+                   buttons = list(
+                     list(
+                       extend = "excel",
+                       text = boton1,
+                       filename = archivo
+                     )
+                   ))
+  )
+}
+
+```
+
+
+## Data description
+
+Datasets include:
+
+- pilot_plots.csv: trees level measurements with DBH, height, strata, plot radius, site, and plot id
+- project_area.csv: site level area in hectares
+- rs_baseline_agb.csv: strata level baseline AGB (t dry matter/ha) from two RS models: “A” (≈+7% bias) and  “B” (≈−3% bias).
+- species_params.csv: wood density and survival data
+
+```{r  echo=FALSE}
+pilot_plots <- "data/pilot_plots.csv" %>% read.csv()
+
+project_area <- "data/project_area.csv" %>% read.csv()
+
+rs_baseline_agb <- "data/rs_baseline_agb.csv"%>% read.csv()
+
+species_params <- "data/species_params.csv" %>% read.csv()
+
+# wood_density_db <- "C:/Users/charl/Downloads/archive/measurements or facts.txt" %>% read.tx()
+
+```
+
+Comments:
+ 
+ - For pilot_plots dataset, it is not clear if each row represents a single tree or a representative tree from each parcel, as the definition in the documentation was: *40 pilot plots across 2 sites × 2 strata with various properties* making references to plots. Each row is treated as a single tree for accounting purposes
+ 
+### Data processing
+ 
+ In this section the workflow for quality check and general data processing is presented
+
+
+#### pilot_plots dataset
+
+The raw datasets is presented in the next table. As it can be seen, there is a sample_plot_id field that will be used as unique identifier of each record, a site_id that defines the belonging of each plot and tree to an specific site where project activities a presumably taking place but not necesarily representing an spacialy explicit boundary.
+
+**Table 1.** pilot_plots dataset records
+
+```{r}
+pilot_plots
+```
+
+ In the next line a quick overview of the dataset. Data types, length, basic central tendency statistics are verified in order identify potential issues, like the inconsistent data types, out of range numeric values and any other pattern that could require further verification.
+ 
+From this, the presence of 10 Not available values (NAs) in the height variable is relevant, and the presence of peat, status and plot_radius are also interesting
+ 
+ 
+```{r}
+summary(pilot_plots)
+
+```
+ 
+ 
+##### Data evaluation
+  
+  Plot data corresponds to 40 records, distributed in 2 sites (20 records per site) with 2 soil-based strata present in both sites (10 trees per strata and site combination). 
+
+Table 2. Count of measures by site and strata
+
+Further verification includes 
+```{r, echo=FALSE}
+pilot_plots_count <- pilot_plots %>% count(site_id,stratum)
+pilot_plots_count
+```
+Visual inspection of measures a the level of sites and strata. The cloud of points of the mineral_sand stratum from site LVA002 seems a little different from their pairs, these could be just noise or represent something else in that stratum and specific site (limitations in the field, data processing, etc.)
+
+```{r, echo=FALSE}
+coplot(height_m ~ dbh_cm  | stratum * site_id, type = "p", data = pilot_plots, ylab = "Height (m)", xlab = "DBH (cm)")
+
+```
+Following, it is important to verify and identify potential reasons for missing data, as well as patterns if any.
+
+Plots presented missing values for *hight_m* column (10). The NAs are almost equally distributed by each site and stratum
+
+```{r, echo=FALSE}
+# Height NAs
+pilot_plots_count_nas <- pilot_plots
+pilot_plots_count_nas$na <-  is.na(pilot_plots$height_m)
+pilot_plots_count_nas_by_strata_site <- pilot_plots_count_nas %>% filter(na == TRUE) %>% count(site_id,stratum)
+
+p <- pilot_plots_count_nas_by_strata_site %>% janitor::adorn_totals()
+
+p
+```
+
+Plots presented three species *Betula pendula*, *Picea abies*, *Pinus sylvestris*
+
+```{r, echo=FALSE}
+pilot_plots_count_species <- pilot_plots %>% count(site_id,stratum, species)
+# pilot_plots_count_species
+
+pivot_pilot_plots_count_species <- pilot_plots_count_species %>% pivot_wider(names_from = species,values_from = n)
+pivot_pilot_plots_count_species  %>% janitor::adorn_totals(where = "row") %>% janitor::adorn_totals(where = "col")
+```
+
+Below the number of missing values by species is presented. Being 40% of the height of *Pinus sylvestris* missing and the sample relatively small (n=30)
+
+```{r, echo=FALSE}
+pilot_plots_count_nas_by_species <- pilot_plots_count_nas%>% filter(na == TRUE)  %>% count(species)
+pilot_plots_count_nas_by_species
+```
+
+Having into account the status of plots, the planted status represents 87.5% (35 plots) of the records but it is assumed that the assisted natural regeneration plots would also be included in the project. It is usually recommended to treat these as a different stratum in order to improve precision, but it is not required under the area based approach, and also there are very few. 
+
+```{r, echo=FALSE}
+trees_by_strata_species_status <- pilot_plots  %>% count(site_id,stratum, status) %>% arrange(status) %>% pivot_wider(names_from = status, values_from = n)
+trees_by_strata_species_status <- trees_by_strata_species_status %>% janitor::adorn_totals(where = c( "row","col"))
+trees_by_strata_species_status
+
+```
+
+##### Peat
+  
+  It seems that some plots recorded the presence of peat (3). According to the VM00047 methodology, it will be necessary to  develop the activities using a multiple project activity design, applying this methodology to account for AGB and using a Wetland restoration and conservation methodology to account for other carbon pools.
+
+##### Conclusions about data
+
+- Plots data presents 40 measures for height and DBH of 2 sites, with 2 strata, 2 plots status (assisted natural regeneration or planted), and peat presence (3/40)
+
+- Peatland is present in 3 plots, VM0047 will be used for AGB monitoring but it will be necessary to spatially separate the boundaries of these plots or planting areas/instances. 
+
+
+
+## Part 1 - Sampling adequacy
+
+The exercise requires the following: 
+
+1) Clean & expand
+   - Evaluate and impute missing data that is required; explain methods applied.
+   - Expand plot measurements to “per-hectare AGB” estimates.
+   - apply any other exclusion or separation steps as you see fit; explain your thinking. 
+2) Precision & required samples
+   - For each site × stratum, compute mean and variance of AGB/ha.
+   - Report relative margin of error at 90% CL.
+   - Choose a precision target and estimate required and additional samples using a standard sample-size formula. 
+   - Document all processes and add 3–5 concrete design improvements.
+
+### Plots Data imputation
+
+As there are some missing measures within the dataset, specifically the **height_m** column, with 10 NAs, and the exercise requires its imputation. A linear model with log-log transformation was used for imputing data, all the valid records (DBH - HEIGHT) where considered to train the model for imputation and the model was applied to all the missing data regardless of the species, this considering the lack of data, specially for (*Pinus sylvestris*) and that the introduction of external data from places with different condition could add more uncertainty to the values (values from mature forests, different soils and climate).  
+
+As the total number of records of the sample is really small n=30, and also incomplete NAs=10, it is necessary to increase the size of the sample in order to generate more accurate estimates. It is also important to have in mind the project areas at each site (LVA001 and LVA002 with 120.5 and 85.3 ha respectively).
+
+
+Figure 2. Height and DBH records without NAs 
+
+```{r, echo=FALSE}
+g_pinus <- pilot_plots_count_nas %>% filter(na == F) %>% ggplot() + aes(x=dbh_cm, y=height_m, colour =species) +geom_line() + geom_point()
+
+g_pinus
+```
+
+
+#### Create a height model for imputation
+
+A model was built using the 29 available trees to predict height from diameter (DBH). The results confirm that DBH and height are clearly related. However, the model's predictions are not very precise. This is expected because the small dataset mixes several different species and soil types, each with its own growth pattern. Nevertheless, this general model was used to impute height because trying to build more complex models (e.g., one for each species) from such a small and varied dataset would produce unreliable results.
+
+```{r, echo=FALSE}
+# 1. Crear el set de "entrenamiento" con los datos que SÍ tenemos
+# (Filtramos árboles muy pequeños (ej. dbh < 0.5cm) que pueden distorsionar el modelo)
+training_data <- pilot_plots %>%
+  filter(!is.na(height_m) & !is.na(dbh_cm) & dbh_cm > 0.5)
+
+# 2. Entrenar el modelo lineal (lm) usando la transformación log-log
+# Usamos log() que es el logaritmo natural (ln) en R
+# La fórmula significa "predice log(height_m) usando log(dbh_cm)"
+height_model <- lm(log(height_m) ~ log(dbh_cm), data = training_data)
+
+# height_model2 <- lm(log(height_m) ~ log(dbh_cm) + species, data = training_data)
+
+# (Opcional) Puedes inspeccionar tu modelo para ver si es bueno
+print(summary(height_model)) # El R-squared debería ser alto
+
+# print(summary(height_model2)) # El R-squared debería ser alto
+
+
+```
+
+
+```{r, echo=FALSE}
+# 3. Aplicar el modelo para predecir y rellenar los valores faltantes
+plots_imputed <- pilot_plots %>%
+  mutate(
+    # Aplicamos el modelo para PREDECIR el log(height_m) donde falta
+    log_height_pred = predict(height_model, newdata = .),
+    
+    # Convertimos la predicción de logaritmo de vuelta a metros usando exp()
+    height_imputed = exp(log_height_pred),
+    
+    is_imputed = is.na(height_m),
+    
+    
+    # Rellenamos los NA.
+    # ifelse(condición, si_es_verdad, si_es_falso)
+    height_m = ifelse(is.na(height_m), height_imputed, height_m),
+    
+  )
+
+```
+
+
+```{r, echo=FALSE}
+# 2. Crear el Gráfico 2
+plot2 <- ggplot(plots_imputed, aes(x = dbh_cm, y = height_m)) +
+  # Coloreamos por el flag 'is_imputed' y damos forma por 'species'
+  geom_point(aes(color = is_imputed, shape = species), size = 3, alpha = 0.8) +
+  
+  # Definir los colores manualmente (Rojo para Imputado, Negro para Real)
+  scale_color_manual(
+    values = c("FALSE" = "black", "TRUE" = "red"),
+    labels = c("Real", "Imputed")
+  ) +
+  
+  labs(
+    # title = "Datos Imputados en Contexto",
+    x = "Diamter (dbh_cm)",
+    y = "Height (height_m)",
+    color = "Data type"
+  ) +
+  theme_minimal()
+
+# 3. Mostrar el gráfico
+print(plot2)
+```
+
+### Plot expansion
+
+For expansion, published allometric equations per species where used in order to obtain Above ground biomass (AGB) in kilograms per tree. The equations where selected based on the following Geographic correspondence prioritization, where  priority was given to find local equations, if not regional and in the last case global. Equations from Repola (2008, 2009) where used, these equations were developed for trees in Finland same region as Latvia, there are some other equations for Latvia but with restricted access. 
+
+#### Separation criteria
+
+The primary separation was performed at the tree level, applying the most appropriate allometric models for each genus (Repola 2008, 2009), ensuring an accurate biomass estimate before aggregation. Plot data were separated into two soil strata (Mineral and Peat) based on the peat column. This separation is methodologically necessary because Repola's (2008, 2009) equations were developed for mineral soils, and biomass growth in peatlands is inherently different.
+
+#### Exclusion criteria
+
+- Data was filtered by the DBH (cm), using a minimum threshold of 1.5m. as the equations used were developed using trees with that minimum DBH
+
+- AGB was calculate also for peat areas for comparison purposes but these plots will be excluded in further procedures as the equations used are were developed for mineral soils. 
+
+#### Expanding Tree Biomass to Per-Hectare Estimates
+
+To assess sampling adequacy, the first step was to convert the field measurements (diameter and height) into a standardized metric of Aboveground Biomass (AGB) in tonnes per hectare (t/ha). This was achieved using species-specific allometric equations to ensure the highest possible accuracy. Based on the scientific literature for boreal forests, the biomass models from Jaakko Repola were selected, as they provide specific functions for the project's three key species in Finland.
+
+The data in pilot_plots.csv represents a sampling design where each row is a unique plot with a single tree measured. Therefore, the AGB/ha calculation for each plot involved two steps: (1) Calculating the total biomass in kg for the individual tree using its allometric equation, and (2) Expanding this biomass value to a per-hectare (10,000 $m^2$) basis using the plot-specificplot_radius_m.
+
+All equations from Repola (2008, 2009) [cite: 1-739, 1024-1108] use a transformation of diameter ($d$) in cm and height ($h$) in m. The biomass ($y$) is calculated in kg and includes a correction factor for the log-transformation bias ($C = 0.5 \cdot (\sigma_u^2 + \sigma_e^2)$).
+
+1. **Diameter Transformation (Common):** $d_{Ski} = 2 + 1.25 \cdot d$
+
+2. **Betula pendula (Birch):** (Repola 2008, Eq. 11) $$y = \exp(-3.654 + 10.582 \cdot \frac{d_{Ski}}{d_{Ski} + 12} + 3.018 \cdot \frac{h}{h + 22} + C_{\text{birch}})$$ Where $C_{\text{birch}} = 0.5 \cdot (0.00068 + 0.00727)$
+
+3. **Pinus sylvestris (Pine):** (Repola 2009, Eq. 9) $$y = \exp(-3.198 + 9.547 \cdot \frac{d_{Ski}}{d_{Ski} + 12} + 3.241 \cdot \frac{h}{h + 20} + C_{\text{pine}})$$ Where $C_{\text{pine}} = 0.5 \cdot (0.009 + 0.010)$
+
+4. **Picea abies (Spruce):** (Repola 2009, Eq. 17) $$y = \exp(-1.808 + 9.482 \cdot \frac{d_{Ski}}{d_{Ski} + 20} + 0.469 \cdot \ln(h) + C_{\text{spruce}})$$ Where $C_{\text{spruce}} = 0.5 \cdot (0.006 + 0.013)$
+
+ 
+
+```{r, echo=FALSE}
+
+# Asumimos que 'species_params' es tu dataframe cargado
+WD_BETULA <- 0.525 # g/cm3 (Fuente: Zanne, A.E., Lopez-Gonzalez, G.*, Coomes, D.A., Ilic, J., Jansen, S., Lewis, S.L., Miller, R.B., Swenson, N.G., Wiemann, M.C., and Chave, J. 2009. Global wood density database. Dryad. Identifier: http://hdl.handle.net/10255/dryad.235. )
+
+species_params_imputed <- species_params %>%
+  mutate(
+    wd_g_cm3 = ifelse(species == "Betula pendula", WD_BETULA, wd_g_cm3)
+  )
+
+plot_data_full <- plots_imputed %>%
+  left_join(species_params_imputed, by = "species")
+
+# Equations
+
+# 
+
+
+# Calcular AGB (kg) y AGB/ha por parcela (1 árbol por parcela)
+plot_agb <- plot_data_full %>% 
+  mutate(
+    # Definir d_Ski según Repola (2008, 2009)
+    d_ski = 2 + 1.25 * dbh_cm,
+
+    agb_kg = case_when(
+      # --- Betula pendula ---
+      # Repola 2008, Eq. 11, total above-ground biomass
+      species == "Betula pendula" ~ exp(
+        -3.654 +
+        10.582 * (d_ski / (d_ski + 12)) +
+        3.018 * (height_m / (height_m + 22)) +
+        0.5 * (0.00068 + 0.00727)
+      ),
+
+      # --- Pinus sylvestris ---
+      # Repola 2009, Eq. 9
+      species == "Pinus sylvestris" ~ exp(
+        -3.198 +
+        9.547 * (d_ski / (d_ski + 12)) +
+        3.241 * (height_m / (height_m + 20)) +
+        0.5 * (0.009 + 0.010)
+      ),
+
+      # --- Picea abies ---
+      # Repola 2009, Eq. 17
+      species == "Picea abies" ~ exp(
+        -1.808 +
+        9.482 * (d_ski / (d_ski + 20)) +
+        0.469 * log(height_m) +
+        0.5 * (0.006 + 0.013)
+      ),
+
+      TRUE ~ NA_real_
+    ),
+
+    # Conversión a toneladas
+    agb_tonnes = agb_kg / 1000,
+
+    # Área de la parcela en hectáreas
+    parcel_area = (pi * (plot_radius_m^2)) / 10000,
+
+    # AGB por hectárea (1 árbol por parcela en este caso)
+    agb_plot_tn_ha = agb_tonnes / parcel_area
+  )
+
+
+# How do I do this? 
+
+
+
+
+```
+
+
+```{r,echo=FALSE}
+plot_agb 
+```
+
+
+
+```{r,echo=FALSE}
+df_plot <- plot_agb %>%
+  mutate(site_stratum = paste(site_id, stratum, sep = "\n"))
+
+# --- STEP 3: Create a summary dataframe for 'n' labels ---
+# This will be used to add the sample size text to the plot
+plot_summary <- df_plot %>% filter( dbh_cm>= 1.5) %>% 
+  group_by(site_stratum, site_id) %>%
+  summarise(
+    n = n(),
+    # Calculate y-position for the label (e.g., just above the max value)
+    # We add a small buffer (0.05) so it doesn't overlap with the point
+    y_position = max(agb_plot_tn_ha, na.rm = TRUE) + 0.05 
+  ) %>%
+  ungroup() # Ungroup for safety
+
+# --- STEP 4: Create the ggplot ---
+agb_plot <- ggplot(df_plot, aes(x = site_stratum, y = agb_plot_tn_ha, fill = site_id)) +
+  
+  # Boxplot layer
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) + # outlier.shape=NA hides default outliers
+  
+  # Jitter (points) layer to show individual plots
+  geom_jitter(width = 0.15, alpha = 0.8, color = "black") +
+  
+  # --- Add the 'n' labels ---
+  # Use the plot_summary dataframe for this layer
+  geom_text(
+    data = plot_summary,
+    aes(label = paste("n =", n), y = y_position),
+    size = 3.5,
+    color = "black",
+    vjust = -0.5 # Adjust to sit slightly above the y_position
+  ) +
+  
+  # Labels and Titles
+  labs(
+    title = "AGB/ha Distribution by Site and Stratum",
+    subtitle = "Eligible plots. Each point is one plot.",
+    x = "Stratum (Site and Type)",
+    y = "AGB (tonnes per hectare)",
+    fill = "Site"
+  ) +
+  
+  # Clean theme and formatting
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    legend.position = "none" # Hide legend as info is redundant
+  ) +
+  
+  # Optional: Adjust y-axis limit to ensure labels fit
+  expand_limits(y = max(plot_summary$y_position) * 1.1)
+
+# To save the plot:
+# ggsave("agb_stratum_boxplot_with_n.png", agb_plot, width = 10, height = 7, dpi = 150)
+
+# To display the plot in RStudio:
+print(agb_plot)
+
+```
+
+
+### Precision & required samples
+
+  An analysis of sampling adequacy was performed on the 36 eligible plots (removing plots with peat and trees with DBH less than 1.5 cm). VM0047 V1.1 allows project activities in peatlands but it is necessary to apply other methodology for carbon pools other than AGB, so for accuracy and simplicity plots with peat were removed.
+  
+  The mean Aboveground Biomass (AGB) was low, ranging from **0.40 to 0.82 t/ha** across the four strata (Table XX). The precision of these mean estimates, however, is statistically insufficient. The Relative Margin of Error (RME) at a 90% confidence level is high for all strata, ranging from **42.9% to 84.9%**. This high uncertainty is largely driven by high variance relative to the mean, particularly in the LVA001 | mineral_loam stratum.
+  
+```{r,echo=FALSE}
+
+create_dt(plot_agb  %>% filter( dbh_cm>= 1.5, peat == 0) %>%  select(sample_plot_id,site_id,stratum,dbh_cm,height_m,agb_tonnes),
+          titulo_tabla = "Estimated AGB (t/ha) at tree level",
+          boton = "",
+          archivo = "estimated_agb_per_tree")
+```
+  
+
+To achieve a standard precision target of **15% RME**, a substantial increase in sampling intensity is required. The analysis shows that the number of additional plots needed ranges from **62 to 280** per stratum. This result demonstrates that the current pilot sampling (n=8 to 10 plots per stratum) is inadequate for verification and must be expanded significantly to produce a reliable and defensible carbon estimate.
+
+
+
+
+   
+```{r, echo=FALSE}
+
+# --- Paso 1.2: Análisis de Adecuación del Muestreo ---
+# 
+#    - For each site × stratum, compute mean and variance of AGB/ha.
+#    - Report relative margin of error at 90% CL.
+#    - Choose a precision target and estimate required and additional samples using a standard sample-size formula. 
+#    - Document all processes and add 3–5 concrete design improvements.
+
+# Agrupar por sitio y estrato
+sampling_stats <- plot_agb %>%
+  
+  # ¡IMPORTANTE! Aplicar filtros de exclusión ANTES de agrupar
+  # 1. Excluir parcelas en turberas (peat)
+  filter(peat == 0) %>%
+  # 2. Excluir parcelas con árboles fuera del rango del modelo
+  filter(dbh_cm >= 1.5) %>%
+  
+  # Ahora agrupar por los estratos elegibles
+  group_by(site_id, stratum) %>%
+  
+  # Calcular las estadísticas requeridas
+  summarise(
+    n_plots = n(), # Número de parcelas en este estrato
+    mean_agb_t_ha = mean(agb_plot_tn_ha, na.rm = TRUE),
+    std_dev_agb_t_ha = sd(agb_plot_tn_ha, na.rm = TRUE),
+    variance_agb_t_ha = var(agb_plot_tn_ha, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+```
+
+ 
+
+
+```{r, echo=FALSE}
+sampling_stats
+```
+The Relative Margin of Error (RME) at a 90% confidence level (CL) was calculated using the formula $RME = (ME / \bar{x})$, where the Margin of Error (ME) is $ME = t \cdot (s / \sqrt{n})$. The results showed very low precision: the RME was extremely high across all strata, ranging from **42.9%** to **84.9%**, indicating the mean estimates are unreliable.
+
+Following this, the required sample size to achieve a standard industry precision target of **15% RME** was estimated. Using the standard sample size formula, $n_{\text{req}} \approx ( (t \cdot s) / E )^2$, where $E$ is the desired absolute margin of error ($\bar{x} \cdot 0.15$), the results confirmed the pilot sampling is statistically inadequate. The analysis determined that between **70 and 289 total plots** per stratum would be needed to meet this precision target. This means a massive sampling expansion is required, necessitating between **62 and 280 additional plots** in the existing strata before the project could be verified with an acceptable level of uncertainty.
+
+```{r, echo=FALSE}
+  
+# --- PASO 1: APLICAR EXCLUSIONES ---
+# Este es el paso de "exclusión y separación" que documenta tu decisión.
+plot_agb_eligible <- plot_agb %>%
+  filter(
+    # Exclusión 1: No aplicable a VM0047
+    peat == 0, 
+    
+    # Exclusión 2: Fuera del rango del modelo Repola
+    dbh_cm >= 1.5 
+  )
+
+# Deberías tener 36 parcelas aquí
+# print(paste("Parcelas totales elegibles para el análisis:", nrow(plot_agb_eligible)))
+
+# --- PASO 2: CALCULAR ESTADÍSTICAS DE MUESTREO (Parte 1.2) ---
+
+# Definir nuestro nivel de confianza y objetivo de precisión
+CONFIDENCE_LEVEL <- 0.90
+TARGET_RME_PCT <- 15.0 # Nuestro objetivo es 15% de RME
+
+# Calcular todo en un solo pipeline
+sampling_analysis <- plot_agb_eligible %>%
+  
+  # 1. Agrupar por cada sitio y estrato
+  group_by(site_id, stratum) %>%
+  
+  # 2. Calcular media, varianza, y n (Punto 1 del ejercicio)
+  summarise(
+    n_plots = n(),
+    mean_agb_t_ha = mean(agb_plot_tn_ha, na.rm = TRUE),
+    variance_agb_t_ha = var(agb_plot_tn_ha, na.rm = TRUE),
+    std_dev_agb_t_ha = sd(agb_plot_tn_ha, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  
+  # 3. Calcular Margen de Error Relativo (RME) (Punto 2 del ejercicio)
+  mutate(
+    # Grados de libertad (n-1)
+    df = n_plots - 1,
+    
+    # Valor t para nuestro nivel de confianza (90% CL, dos colas)
+    # Usamos 0.95 porque (1 - (1 - 0.90) / 2) = 0.95
+    # Si n=1 (df=0), t_value será NaN, así que lo manejamos.
+    t_value = ifelse(df > 0, qt(1 - (1 - CONFIDENCE_LEVEL) / 2, df), NA),
+    
+    # Error Estándar (SE)
+    std_error = std_dev_agb_t_ha / sqrt(n_plots),
+    
+    # Margen de Error Absoluto (ME)
+    margin_of_error_abs = t_value * std_error,
+    
+    # Margen de Error Relativo (RME) en %
+    # Manejar el caso de que la media sea 0 para evitar dividir por cero
+    rme_90_pct = ifelse(mean_agb_t_ha == 0, NA, (margin_of_error_abs / mean_agb_t_ha) * 100)
+  ) %>%
+  
+  # 4. Estimar muestras requeridas (Punto 3 del ejercicio)
+  mutate(
+    # Primero, definimos nuestro objetivo de error absoluto
+    target_error_abs = mean_agb_t_ha * (TARGET_RME_PCT / 100),
+    
+    # n Requerida = (t * s / E)^2
+    # Manejar división por cero si el error objetivo es 0
+    n_required_raw = ifelse(target_error_abs == 0, 0,
+                        ((t_value * std_dev_agb_t_ha) / target_error_abs)^2
+    ),
+    
+    # Siempre redondear HACIA ARRIBA al entero más cercano
+    n_required = ceiling(n_required_raw),
+    
+    # Parcelas adicionales = (Requeridas - Actuales), con un mínimo de 0
+    additional_plots_needed = pmax(0, (n_required - n_plots))
+  )
+
+# --- PASO 3: MOSTRAR LOS RESULTADOS ---
+# Imprimir la tabla de análisis final
+# print("Análisis de Idoneidad del Muestreo (Resultados Finales):")
+# print(kable(sampling_analysis, digits = 2, format = "markdown"))
+
+sampling_analysis
+```
+
+```{r, echo=FALSE}
+# --- PASO 2: Fusionar los datos de campo con los datos de RS ---
+
+# Unimos nuestras estadísticas de muestreo (la "verdad") con los datos de RS.
+# Usamos left_join para asegurarnos de que solo mantenemos los estratos elegibles
+# que hemos verificado (nuestras 36 parcelas).
+df_baseline_final <- sampling_analysis %>%
+  left_join(rs_baseline_agb, by = c("site_id", "stratum")) %>%
+  
+  # Seleccionar y renombrar las columnas para crear nuestra tabla final
+  select(
+    site_id,
+    stratum,
+    n_plots,
+    mean_agb_t_ha,
+    agb_rs_B_t_per_ha, # El modelo RS que elegimos como el "más cercano"
+    rme_90_pct
+  ) %>%
+  
+  # Renombrar columnas para mayor claridad en el informe
+  rename(
+    final_baseline_agb_t_ha = mean_agb_t_ha,
+    baseline_uncertainty_pct = rme_90_pct,
+    original_rs_model_b = agb_rs_B_t_per_ha
+  )
+
+# --- PASO 3: Mostrar la Tabla de Línea Base Final ---
+# print("Tabla de Línea Base Final (Parte 2.1):")
+# print(kable(df_baseline_final, digits = 2, format = "markdown"))
+
+# Guardar esta tabla para usarla en los siguientes pasos
+# write.csv(df_baseline_final, "final_baseline_table.csv", row.names = FALSE)
+
+df_baseline_final
+
+```
+
+## Part 2 — VM0047-style VCU estimates
+
+### Credits, Deductions, and Scaling to VCUs
+
+This section details the conversion of field estimates into verifiable carbon units (VCUs) by projecting growth, applying methodological conversions, and implementing conservative deductions for uncertainty and risk .
+
+
+### Convert Biomass to Carbon, and Carbon to $CO_2e$
+
+First, the Net Project Growth (per hectare) was calculated. This was done by subtracting the weighted-average baseline AGB from the projected AGB of the project scenario. The project scenario assumed a Mean Annual Increment (MAI) of 2.0 t/ha/yr over a 20-year monitoring period, resulting in a project AGB of 40.0 t/ha.
+
+The net AGB was then converted to net $tCO_2e$ per hectare using the following formulas and project-specific parameters:
+
+Net Total Biomass = $$(AGB_{Project} - AGB_{Baseline}) \cdot (1 + R_{BGB})$$ Where $R_{BGB}$ (Belowground Biomass Ratio) = 0.44 (RSR when less than 75 t d.m/ha - IPCC, 2006)
+
+Net Carbon = $$Net \, Total \, Biomass \cdot CF$$ Where $CF$ (Carbon Fraction) = 0.47 (IPCC, 2006)
+
+Net $CO_2e$ Mean = $$Net \, Carbon \cdot (44/12)$$ Where $44/12$ is the molecular weight ratio of $CO_2$ to Carbon
+
+### Calculate Per-ha Credits and Apply Deductions
+
+Before scaling, two critical deductions were applied at the per-hectare level:Uncertainty Deduction: This deduction is based on the 90% confidence interval (CI) logic, as required 2. First, the sampling uncertainty from our baseline was propagated through the linear conversion formulas to find the final standard error of the net $CO_2e$ estimate. 
+
+The 90% lower confidence bound ($L_{90}$) was then calculated: $L_{90} = Net \, CO_{2e\_Mean} - (1.645 \cdot Standard \, Error_{Net})$
+
+The fractional deduction was calculated as: $Deduction_{Frac} = 1 - (L_{90} / Net \, CO_{2e\_Mean})$
+
+Non-Permanence Buffer: A 25% non-permanence risk buffer was applied to the post-uncertainty credits, as defined in the parameters.
+
+The final verifiable VCU estimate per hectare was calculated as: $VCU_{per\_ha} = (Net \, CO_{2e\_Mean} \cdot (1 - Deduction_{Frac})) \cdot (1 - 0.25)$
+
+```{r, echo=FALSE}
+# --- 1) Definir Parámetros del Proyecto ---
+# (Tu código para esto es perfecto)
+CF <- 0.48       # Fracción de Carbono
+R_bgb <- 0.46    # Ratio Raíz/Tallo (BGB)
+co2_factor <- 44/12
+buffer_pct <- 0.25 # Buffer de No-Permanencia
+z90 <- 1.645     # 90% Nivel de Confianza
+IMA_AGB <- 2.0   # Incremento Medio Anual (t AGB/ha/año)
+MONITORING_PERIOD_YEARS <- 20
+PROJECT_AGB_T_HA <- IMA_AGB * MONITORING_PERIOD_YEARS # (20.0 t/ha)
+
+plot_counts_original <- tibble(
+  site_id = c("LVA001", "LVA001", "LVA002", "LVA002"),
+  stratum = c("mineral_loam", "mineral_sand", "mineral_loam", "mineral_sand"),
+  original_n = c(10, 10, 10, 10) # Basado en tu R output
+)
+
+# --- 2) Calcular Pesos de Área (Area Weights) ---
+stratum_weights <- plot_counts_original %>%
+  group_by(site_id) %>%
+  mutate(total_plots_in_site = sum(original_n)) %>%
+  ungroup() %>%
+  mutate(area_weight = original_n / total_plots_in_site) %>%
+  select(site_id, stratum, area_weight)
+ 
+
+# --- 3) Colapsar Estadísticas a Nivel de SITIO ---
+# (Tu código para 'site_stats' y 'vcu_calculation_table' es correcto)
+site_stats <- sampling_analysis %>%
+  left_join(stratum_weights, by = c("site_id", "stratum")) %>%
+  mutate(
+    weighted_mean = mean_agb_t_ha * area_weight,
+    weighted_var_of_mean = (area_weight^2) * (std_error^2)
+  ) %>%
+  group_by(site_id) %>%
+  summarise(
+    site_mean_agb_t_ha = sum(weighted_mean, na.rm = TRUE),
+    site_std_err = sqrt(sum(weighted_var_of_mean, na.rm = TRUE))
+  )
+
+vcu_calculation_table <- site_stats %>%
+  left_join(project_area, by = "site_id")
+
+# --- 4) Calcular VCUs Netos (AHORA a Nivel de Sitio) ---
+final_vcu_report <- vcu_calculation_table %>%
+  mutate(
+    # --- Biomasa Neta (Net Biomass) ---
+    net_agb_t_ha = PROJECT_AGB_T_HA - site_mean_agb_t_ha,
+    
+    # --- Biomasa Total (AGB + BGB) ---
+    net_total_biomass_t_ha = net_agb_t_ha * (1 + R_bgb),
+    
+    # --- Carbono Neto (tC/ha) ---
+    net_carbon_t_ha = net_total_biomass_t_ha * CF,
+    
+    # --- CO2e Neto (tCO2e/ha) ---
+    net_co2e_mean_t_ha = net_carbon_t_ha * co2_factor,
+    
+    # --- Propagación de Incertidumbre (SE) ---
+    # Asumimos que el "PROJECT_AGB" (de literatura) no tiene error.
+    # El único error es el de nuestro muestreo de línea de base (site_std_err)
+    se_net_agb = site_std_err,
+    se_net_total_biomass = se_net_agb * (1 + R_bgb),
+    se_net_carbon = se_net_total_biomass * CF,
+    se_net_co2e = se_net_carbon * co2_factor,
+    
+    # --- Aplicar Deducción por Incertidumbre ---
+    L90_co2e_t_ha = net_co2e_mean_t_ha - (z90 * se_net_co2e),
+    
+    deduction_frac = case_when(
+      net_co2e_mean_t_ha <= 0 ~ 1, 
+      L90_co2e_t_ha <= 0 ~ 1,
+      TRUE ~ 1 - (L90_co2e_t_ha / net_co2e_mean_t_ha)
+    ),
+    
+    credits_after_uncertainty_t_ha = net_co2e_mean_t_ha * (1 - deduction_frac),
+    
+    # --- Aplicar Buffer de No-Permanencia ---
+    vcu_per_ha = credits_after_uncertainty_t_ha * (1 - buffer_pct),
+    
+    # --- Escalar al Área Total del SITIO ---
+    TOTAL_VCUs_SITE = vcu_per_ha * project_area_ha
+  )
+
+# --- 5) Mostrar Reporte Final ---
+print("Reporte Final de VCUs por Sitio (Periodo de 10 años):")
+final_report_table_clean <- final_vcu_report %>%
+  select(
+    site_id, project_area_ha, net_co2e_mean_t_ha, 
+    se_net_co2e, L90_co2e_t_ha, deduction_frac, 
+    vcu_per_ha, TOTAL_VCUs_SITE
+  )
+
+# print(kable(final_report_table_clean, digits = 2, format = "markdown"))
+
+
+final_report_table_clean
+```
+
+### Scale to Total VCUs Across All Project Areas
+
+Finally, the net verifiable VCU estimate per hectare for each site was scaled to the entire project by multiplying it by the site's total area. The sum of these site-level VCUs gives the total project VCU estimate for the 20-year period.
+
+```{r, echo=FALSE}
+# Calcular el Gran Total
+total_project_vcus <- sum(final_vcu_report$TOTAL_VCUs_SITE, na.rm = TRUE)
+print(paste("Total VCUs of the project including all project sites", round(total_project_vcus, 0)))
+
+total_project_vcus
+```
+## Conclusions and recomendations
+
+Conclusions and Recommendations
+This analysis successfully processed pilot plot data to establish a preliminary baseline, quantify sampling uncertainty, and estimate potential Verifiable Carbon Units (VCUs) for the 20-year project period. The findings are summarized below, followed by concrete recommendations for improving the project's design and statistical robustness before verification.
+
+### Conclusions
+
+Baseline AGB is Low: The field data indicates a low initial Aboveground Biomass (AGB) on eligible lands. The weighted-average baseline AGB, which forms the basis for credit calculation, was determined to be 0.60 t/ha for site LVA001 and 0.62 t/ha for site LVA002.
+
+Current Sampling is statistically inadequate: The primary finding from Part 1 is that the pilot sampling (n=36 eligible plots) is statistically insufficient for a verifiable carbon project. The Relative Margin of Error (RME) at a 90% confidence level is excessively high for all strata, ranging from 42.9% to 84.9%. This is far from the standard target of 15-20%.
+
+High uncertainty drastically reduces credits: The high sampling uncertainty directly impacts the VCU estimate. For sites LVA001 and LVA002, the fractional uncertainty deductions were 46.8% and 52.2%, respectively. This means nearly half of the projected carbon removals were "lost" to this statistical penalty before the non-permanence buffer was applied.
+
+Preliminary VCU Potential: Despite the heavy deductions, the project shows potential. After conservatively applying both uncertainty and a 25% non-permanence buffer, the total estimated verifiable credits for the 20-year monitoring period across both sites (205.8 ha) is ~3,763 VCUs.
+
+### Recommendations for Project Design Improvement
+
+The high uncertainty is not a permanent failure but a clear signal that the project design must be improved. The following 3-5 concrete improvements are recommended:
+
+Mandatory Sampling Expansion: The current sampling is inadequate. The project must expand its field sampling campaign. Based on the analysis, a minimum of 280 additional plots are needed in the LVA001 | mineral_loam stratum alone to meet the 15% RME target. A robust sampling plan, guided by the additional_plots_needed analysis, is the highest priority.
+
+
++ Formally Delineate and Manage peatlands: These areas must be formally delineated using spatial data. The project must either:
+
+a) Exclude them from the project boundary entirely.
+
+b) Register them as a separate project activity under an approved wetland methodology, which would account for soil carbon and other pools not covered by the AGB-focused VM0047.
+
+
++ Strengthen Allometric Model Validity: The use of Finnish allometric equations (Repola 2008, 2009)  is a defensible and appropriate starting point, but it introduces unquantified model uncertainty
+
+## References:
+
+- Intergovernmental Panel on Climate Change (IPCC). (2006). Chapter 4: Forest land. In H.S. Eggleston, L. Buendia, K. Miwa, T. Ngara, & K. Tanabe (Eds.), 2006 IPCC guidelines for national greenhouse gas inventories: Volume 4. Agriculture, forestry and other land use (pp. 4.1–4.83). Institute for Global Environmental Strategies (IGES) for the IPCC. https://www.ipcc-nggip.iges.or.jp/public/2006gl/pdf/4_Volume4/V4_04_Ch4_Forest_Land.pdf
+
+- Repola, J. (2009). Biomass equations for Scots pine and Norway spruce in Finland. Silva Fennica , 43(4) , 625–647.
+- Repola, J. (2008). Biomass equations for birch in Finland. Silva Fennica , 42(4) , 605–624.
+
